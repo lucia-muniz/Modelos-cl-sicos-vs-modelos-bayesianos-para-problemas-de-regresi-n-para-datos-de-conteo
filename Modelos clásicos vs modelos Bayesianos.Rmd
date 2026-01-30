@@ -11,7 +11,7 @@ knitr::opts_chunk$set(
 options(width = 80)
 ```
 
-# Parte I: Modelos clásicos y bayesianos
+# Modelos clásicos y bayesianos
 En esta primera parte del trabajo se analiza el conjunto de datos africa, disponible en la librería faraway, que contiene información sobre golpes de Estado en países africanos. En este conjunto se encuentra la variable respuesta (miltcoup), que es el número de golpes de Estado por país, junto con diversas variables de carácter político, institucional y geográfico.
 
 El objetivo es estudiar los factores que influyen en la frecuencia de estos golpes de Estado mediante el ajuste de modelos de regresión, tanto desde un enfoque clásico como bayesiano. Para ello, se desarrollan distintos modelos, se analizan sus supuestos, se seleccionan las variables más relevantes y se interpretan los efectos de las covariables sobre la variable respuesta.
@@ -478,3 +478,4 @@ Ambos modelos capturan la tendencia general de los datos, aunque el modelo bayes
 Desde el punto de vista interpretativo, el enfoque bayesiano permite cuantificar explícitamente la incertidumbre mediante distribuciones posteriores e intervalos de credibilidad, aportando información adicional frente al Lasso. Este último resulta útil para selección de variables y como herramienta exploratoria, pero no permite un análisis completo de la incertidumbre.
 
 En conjunto, el modelo bayesiano se muestra más adecuado para predicción e interpretación, mientras que el Lasso es una buena alternativa para identificar covariables relevantes de forma rápida y sencilla.
+
