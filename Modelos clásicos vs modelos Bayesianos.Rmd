@@ -1,0 +1,480 @@
+---
+title: "Modelos clásicos vs modelos bayesianos con variable respuesta Poisson"
+author: 'Lucía Muñiz Presno'
+date: "2025-12-14"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning = FALSE, message = FALSE,
+  fig.width = 7, fig.height = 2.5, fig.align = "center")
+options(width = 80)
+```
+
+# Parte I: Modelos clásicos y bayesianos
+En esta primera parte del trabajo se analiza el conjunto de datos africa, disponible en la librería faraway, que contiene información sobre golpes de Estado en países africanos. En este conjunto se encuentra la variable respuesta (miltcoup), que es el número de golpes de Estado por país, junto con diversas variables de carácter político, institucional y geográfico.
+
+El objetivo es estudiar los factores que influyen en la frecuencia de estos golpes de Estado mediante el ajuste de modelos de regresión, tanto desde un enfoque clásico como bayesiano. Para ello, se desarrollan distintos modelos, se analizan sus supuestos, se seleccionan las variables más relevantes y se interpretan los efectos de las covariables sobre la variable respuesta.
+
+Además, se comparan los resultados de ambos enfoques, prestando atención a la incertidumbre de las estimaciones, la convergencia de los algoritmos bayesianos y la interpretación de los intervalos de confianza y de credibilidad.
+
+## Carga de datos y exploración inicial:
+```{r}
+library(faraway)
+data(africa)
+?africa
+```
+La variable respuesta miltcoup sigue una distribución natural poisson, sin embargo, vamos a estudiar si se puede ajustar mejor con una Binomial Negativa en el caso de que haya sobre-dispersión, o una ZIP/ZINB si la proporción de ceros fuese muy alta.
+
+## Limpieza y EDA:
+```{r}
+# Limpieza mínima: quitar filas con NA 
+vars <- c("miltcoup","oligarchy","pollib","parties","pctvote","popn","size","numelec","numregim")
+africa2 <- africa[complete.cases(africa[ , vars]), ]
+
+#EDA automático + multicolinealidad
+library(DataExplorer)
+#create_report(africa)
+#create_report(africa2)
+mod_vif <- glm(miltcoup ~ ., data = africa2, family = poisson)
+vif(mod_vif)
+var(africa2$miltcoup)
+summary(africa2)
+
+library(ggplot2)
+ggplot(africa2, aes(x=factor(miltcoup))) +
+  geom_bar(fill="lightgreen") +
+  geom_text(stat='count', aes(label = after_stat(count)), vjust=-0.5) +
+  theme_minimal() +
+  labs(x="Número de Golpes de Estado", y="Frecuencia")
+```
+Antes de modelar, se realizó una limpieza básica eliminando las observaciones con valores faltantes y un análisis exploratorio de datos (EDA) sencillo para estudiar la variable respuesta y las covariables.
+
+Además, se calculó el factor de inflación de la varianza (VIF) para evaluar la multicolinealidad. Ninguna variable presentó un VIF excesivamente alto, por lo que se incluyen todas en el modelo inicial.
+
+La variable miltcoup presenta una proporción moderada de ceros, descartándose modelos inflados en ceros. Presenta una media de 1.58 y una varianza de 3.11, lo que indica posible sobre-dispersión (ratio ≈ 1.96) respecto a la distribución de Poisson, por lo que vamos a realizar un análisis DHARm para asegurarnos que un modelo NegBin sería una mejor opción.  
+
+## Enfoque tradicional
+Empezamos suponiendo que la variable respuesta se distribuye como una poisson:
+```{r, fig.width=7, fig.height=4}
+mod_pois_full <- glm(miltcoup ~ ., data = africa2, family = poisson)
+summary(mod_pois_full)
+
+dispersion <- sum(residuals(mod_pois_full, type = "pearson")^2) / mod_pois_full$df.residual
+dispersion
+
+library(DHARMa)
+simres <- simulateResiduals(mod_pois_full)
+plot(simres)
+```
+Las varibles oligarchy, pollib y pctvote parecen ser significativas, sin embargo probaremos métodos más robustos que el p-valor para evaluar la relevancia de las covariables.
+
+El parámetro de dispersión es cercano a 1 (1.045), lo que sugiere que no existe sobre-dispersión grave. Además, el análisis de residuos mediante DHARMa confirmó que el modelo Poisson se ajusta adecuadamente a los datos, por lo que se adopta como modelo de referencia para la comparación con el enfoque bayesiano.
+
+### Selección de variables clásica (Lasso y Best Subset):
+```{r}
+set.seed(123)
+n <- nrow(africa2)
+train_idx <- sample(1:n, size = round(0.7*n))
+train <- africa2[train_idx, ]
+test  <- africa2[-train_idx, ]
+
+#probamos best subset selection (no hay muchoas variables ni datos) 
+library(MuMIn)
+library(glmnet)
+options(na.action = "na.fail")
+mod_full <- glm(miltcoup ~ ., data = train, family = poisson)
+dredge_res <- dredge(mod_full, rank = "AIC")
+best_mod <- get.models(dredge_res, 1)[[1]]
+summary(best_mod)
+
+# Modelo final Lasso
+X_train <- model.matrix(miltcoup ~ . -1, data = train)
+y_train <- train$miltcoup
+cv_lasso <- cv.glmnet(X_train, y_train, family = "poisson", alpha = 1)
+mod_lasso <- glmnet(X_train, y_train, family = "poisson", alpha = 1,
+                    lambda = cv_lasso$lambda.min)
+summary(mod_lasso)
+coef_lasso <- coef(mod_lasso)
+coef_lasso
+
+pred_best <- predict(best_mod, newdata = test, type = "response")
+err_best <- mean((test$miltcoup - pred_best)^2)
+
+X_test <- model.matrix(miltcoup ~ . -1, data = test)
+pred_lasso <- predict(mod_lasso, newx = X_test, type = "response")
+err_lasso <- mean((test$miltcoup - pred_lasso)^2)
+
+cbind(err_best, err_lasso)
+
+# resultados
+errors <- data.frame(Metodo    = c( "Best Subset", "Lasso"),
+                     ErrorTest = c( err_best, err_lasso))
+
+# Graficar barras comparativas
+library(ggplot2)
+
+ggplot(errors, aes(x = Metodo, y = ErrorTest, fill = Metodo)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = c("Lasso" = "#9EC9E6", "Best Subset" = "#8C6BB1")) +
+  theme_minimal() +
+  labs(title = "Comparación de error en test por método",
+       y = "Error de test (MSE)",x = "Método") +
+  theme(legend.position = "none")
+
+```
+Se ajustó un modelo Poisson simplificado usando las variables seleccionadas por Best Subset y Lasso. El modelo de Best Subset incluyó oligarchy y pctvote, con efecros positivos y pollib con efecto negativo sobre la cantidad de golpes de Estado. Por su parte, Lasso mantiene el efecto negativo de pollib y positivo de oligarch y popn.
+
+La comparación de métodos indica que Lasso logra un menor error de predicción en el conjunto de prueba (MSE = 2.03) frente a Best Subset (MSE = 3.86), lo que sugiere que la regularización ayuda a mejorar la generalización. El modelo simplificado conserva interpretabilidad y buen ajuste, por lo que se considera adecuado como referencia clásica antes del análisis bayesiano.
+
+## MODELOS BAYESIANOS: 
+```{r}
+form <- as.formula("miltcoup ~ .")
+
+# Matriz de diseño y respuesta
+X_all <- model.matrix(form, data = train)  # incluye intercepto
+y     <- train$miltcoup
+
+# Estandarizar covariables (excepto el intercepto)
+X <- X_all
+idx_non_intercept <- which(colnames(X) != "(Intercept)")
+X[, idx_non_intercept] <- scale(X[, idx_non_intercept])
+
+N <- nrow(X); P <- ncol(X)
+```
+Para el ajuste del modelo bayesiano, se construyó una matriz de diseño a partir del conjunto de entrenamiento, incluyendo todas las covariables y el intercepto. Las covariables fueron estandarizadas, excepto el intercepto, para facilitar la definición de priors y mejorar la convergencia de las cadenas. Se definieron N observaciones y P predictores, dimensiones que se utilizarán en la especificación de los modelos bayesianos en Greta y Stan.
+
+### Modelo bayesiano Poisson con Horseshoe
+```{r, results='hide'}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan::rstan_options(auto_write = TRUE)
+
+stan_code_pois_horseshoe <- "
+data {
+  int<lower=1> N;
+  int<lower=1> P;
+  int<lower=0> y[N];
+  matrix[N, P] X;
+}
+parameters {
+  vector[P] beta_raw;            // núcleo
+  real<lower=0> tau;             // escala global horseshoe
+  vector<lower=0>[P] lambda;     // escalas locales
+}
+transformed parameters {
+  vector[P] beta;
+  beta = beta_raw .* (tau * lambda);   // beta_j = beta_raw_j * tau * lambda_j
+}
+model {
+  // Priors horseshoe
+  beta_raw ~ normal(0, 1);
+  tau ~ cauchy(0, 0.5);          // parámetro elegido para reducir divergencias y mejorar mezcla
+  lambda ~ cauchy(0, 1);
+
+  // Poisson log-link
+  y ~ poisson_log(X * beta);
+}
+generated quantities {
+  vector[N] mu = exp(X * beta);
+  vector[N] log_lik;
+  for (n in 1:N) {
+    log_lik[n] = poisson_log_lpmf(y[n] | X[n] * beta);
+  }
+}
+"
+
+dat <- list(N = N, P = P, y = y, X = X)
+set.seed(123)
+fit_pois_hs <- stan(model_code = stan_code_pois_horseshoe, data = dat,
+                    chains = 4, iter = 4000, warmup = 1000, seed = 123)
+```
+
+```{r}
+print(fit_pois_hs, pars = c("beta[1]", "beta[2]", "tau"), probs = c(0.025, 0.5, 0.975))
+```
+Se ajustó un modelo Poisson bayesiano con prior Horseshoe, usando una Cauchy para los parámetros global (tau) y locales (lambda). Esto permite que los coeficientes grandes importantes no se encogen excesivamente, mientras que los coeficientes irrelevantes se acercan a cero, facilitando selección de variables y parsimonia. La escala moderada en tau ayuda a reducir divergencias y mejorar mezcla de cadenas.
+Además, la matriz de predictoresfue estandarizada previamente para mejorar la convergencia.
+
+Los resultados muestran que el coeficiente de oligarchy mantiene un efecto positivo sobre la cantidad esperada de golpes de Estado, con un intervalo de credibilidad al 95% que no incluye cero. El intercepto y el parámetro global de shrinkage (tau) indican que los demás coeficientes son moderados y que el modelo concentra la información en las variables más relevantes.
+
+Aunque se detectaron 323 divergencias después del warmup, los valores de Rhat = 1 y n_eff elevados indican buena convergencia general. La aparición de divergencias puede reducirse aumentando adapt_delta o simplificando el modelo a las variables seleccionadas en el enfoque clásico (oligarchy, pctvote, pollib).
+
+En conjunto, el modelo bayesiano confirma los hallazgos del modelo Poisson clásico: oligarchy tiene un efecto positivo y significativo sobre la variable respuesta, y el shrinkage adaptativo ayuda a controlar el efecto de variables menos relevantes.
+
+### Seleccion de variables bayesiana:
+```{r}
+post_beta <- rstan::extract(fit_pois_hs, pars = "beta")$beta  # iter x P
+beta_mean <- apply(post_beta, 2, mean)
+beta_ci   <- t(apply(post_beta, 2, quantile, probs = c(0.025, 0.975)))
+
+terms <- colnames(X)
+
+# Selección: intervalo creíble al 95% que no incluya 0
+selected <- (beta_ci[,1] > 0) | (beta_ci[,2] < 0)
+selected_terms <- terms[selected]
+
+sel_df <- data.frame(term = terms, beta_mean = beta_mean,
+                     lo = beta_ci[,1], hi = beta_ci[,2],
+                     selected = selected)
+
+# IRR (razón de incidencia) y CI
+IRR_mean <- exp(beta_mean)
+IRR_lo   <- exp(beta_ci[,1])
+IRR_hi   <- exp(beta_ci[,2])
+
+irr_df <- data.frame(term = terms, IRR = IRR_mean,
+                     IRR_lo = IRR_lo, IRR_hi = IRR_hi,
+                     selected = selected)
+
+# Ordenado y sin intercepto 
+irr_df_report <- subset(irr_df, term != "(Intercept)")
+irr_df_report[order(-irr_df_report$selected, -abs(log(irr_df_report$IRR))), ]
+
+plot_df <- irr_df_report
+plot_df$selected_label <- ifelse(plot_df$selected, "Seleccionada", "No seleccionada")
+
+ggplot(plot_df, aes(x = reorder(term, IRR), y = IRR, ymin = IRR_lo, ymax = IRR_hi, color = selected_label)) +
+  geom_pointrange() +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() + theme_minimal() +
+  labs(title = "IRR bayesiana con intervalos creíbles (Poisson + horseshoe)",
+       x = "Variable", y = "IRR", color = "")
+```
+La selección de variables se basó en intervalos de credibilidad al 95%: si el intervalo no incluye cero, la variable se considera relevante.
+La única variable que parece significativa es oligarchy (IRR = 1.58; IC 95%: 1.01 – 2.33), indicando que un aumento en oligarquía se asocia con mayor número esperado de golpes de Estado.
+Las demás variables presentan intervalos que incluyen 1, reflejando efecto incierto y shrinkage hacia cero por el prior Horseshoe.
+
+
+## Convergencia y diagnóstico:
+```{r}
+library(bayesplot)
+as_array_pois <- as.array(fit_pois_hs)
+
+# Traceplots de betas seleccionadas y tau
+sel_idx <- which(selected)[1:min(5, sum(selected))]  # primeras seleccionadas
+pars_to_plot <- c(paste0("beta[", sel_idx, "]"), "tau")
+mcmc_trace(as_array_pois, pars = pars_to_plot)
+
+# R-hat y ESS
+sum_pois <- summary(fit_pois_hs)$summary
+max_rhat <- max(sum_pois[, "Rhat"], na.rm = TRUE)
+min_neff <- min(sum_pois[, "n_eff"], na.rm = TRUE)
+cat("R-hat máximo:", round(max_rhat, 4), "\n")
+cat("n_eff mínimo:", round(min_neff, 1), "\n")
+
+post <- rstan::extract(fit_pois_hs)
+
+# Intercepto (beta[1]), media acumulada y autocorrelación
+intercepto <- post$beta[, 1]
+beta_sel1 <- post$beta[, sel_idx[1]]
+
+ts.plot(cumsum(intercepto) / seq_along(intercepto),
+        main = "Media acumulada del intercepto",
+        ylab = "Media",
+        xlab = "Iteración")
+
+acf(intercepto,
+    main = "ACF del intercepto")
+```
+Para evaluar la convergencia del modelo se analizaron traceplots de las primeras betas seleccionadas y del parámetro tau. Las cadenas muestran una buena mezcla, sin tendencias ni bloqueos, lo que indica estacionariedad y una convergencia adecuada. Aunque tau presenta mayor variabilidad, las cadenas se superponen correctamente.
+
+Los diagnósticos numéricos refuerzan esta conclusión: el valor máximo de R-hat es 1.0099, muy cercano a 1, y el tamaño muestral efectivo mínimo es 449, ambos indicativos de una estimación fiable.
+
+De forma adicional, la media acumulada y la función de autocorrelación del intercepto muestran estabilidad y autocorrelación decreciente. En conjunto, los traceplots junto con R-hat y n_eff son suficientes para concluir que el modelo ha convergido correctamente y que los resultados obtenidos son confiables.
+
+## Densidades posteriores 
+### Variable seleccionada:
+```{r}
+library(tidyr)
+library(dplyr)
+
+vars_plot <- selected_terms[1:min(4, length(selected_terms))]
+post_beta_df <- as.data.frame(post_beta)
+colnames(post_beta_df) <- terms
+
+post_beta_sel <- post_beta_df[, vars_plot, drop = FALSE]
+
+post_beta_long <- tidyr::pivot_longer(post_beta_sel, cols = everything(),
+                                      names_to = "Variable", values_to = "Valor")
+
+ggplot(post_beta_long, aes(x = Valor)) +
+  geom_density(fill = "steelblue", alpha = 0.6) +
+  facet_wrap(~ Variable, scales = "free") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Densidades posteriores de coeficientes seleccionados",
+       x = "Valor del coeficiente (beta)", y = "Densidad")
+```
+Las densidades posteriores muestran la distribución de los coeficientes estimados por el modelo Poisson bayesiano con prior Horseshoe. Para oligarchy, la densidad está claramente desplazada de cero y concentrada, indicando un efecto bien identificado con incertidumbre moderada. La ausencia de masa alrededor de cero refuerza su asociación con el número de golpes militares.
+
+El prior Horseshoe induce shrinkage adaptativo: las variables irrelevantes se acercan a cero, mientras que las seleccionadas mantienen coeficientes significativos. Estas gráficas complementan la interpretación basada en IRR e intervalos creíbles, proporcionando una visión clara de la magnitud y la incertidumbre de los efectos.
+
+
+### Variables no seleccionadas:
+```{r}
+# Extraer muestras de beta y nombrar columnas
+post_beta_df <- as.data.frame(post_beta)
+colnames(post_beta_df) <- terms
+
+# Variables a graficar: la seleccionada + parties + pollib
+vars_plot <- c("popn", "pctvote" , "pollib")
+vars_plot <- vars_plot[vars_plot %in% colnames(post_beta_df)]  # seguridad
+
+post_beta_sel <- post_beta_df[, vars_plot, drop = FALSE]
+
+# Graficar densidades
+post_beta_long <- pivot_longer(post_beta_sel, cols = everything(),
+                               names_to = "Variable", values_to = "Valor")
+
+ggplot(post_beta_long, aes(x = Valor)) +
+  geom_density(fill = "steelblue", alpha = 0.6) +
+  facet_wrap(~ Variable, scales = "free") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Densidades posteriores de coeficientes no seleccionados pero de interés",
+       x = "Valor del coeficiente (beta)", y = "Densidad")
+```
+La densidad posterior de pollib se centra ligeramente por debajo de cero, con dispersión moderada, sugiriendo un efecto negativo débil pero incierto. Era la variable que seguía a oligarchy en importancia, lo que se refleja en este plot, aunque su intervalo cruza cero y el modelo no la considera significativa.
+
+Otras variables como pctvote y popn muestran densidades cercanas a cero o con ligeras asimetrías, sin evidencia suficiente de efecto. Esto refleja cómo el prior Horseshoe contrae los coeficientes irrelevantes hacia cero, diferenciando claramente variables fuertes como oligarchy de las débiles o poco informativas.
+
+## Comparación out of sample y LOO:
+```{r}
+library(loo) 
+log_lik <- rstan::extract(fit_pois_hs, pars = "log_lik")$log_lik # iter x N
+loo_pois <- loo(log_lik)
+loo_pois
+```
+Se evaluó la capacidad predictiva del modelo mediante LOO (Leave-One-Out). El LOOIC obtenido fue 84.0, indicando el ajuste global del modelo.
+
+La mayoría de los valores de Pareto k fueron satisfactorios (88% > 0.7), aunque unas pocas observaciones mostraron k altos, señalando posibles puntos influyentes que requieren precaución en la interpretación.
+
+Estos resultados complementan los diagnósticos de convergencia clásicos ya realizados (R-hat aprox. 1, n_eff alto) y gráficos de traceplots, medias acumuladas y autocorrelación, confirmando que el modelo está bien estimado y que las predicciones fuera de muestra son confiables, salvo para algunas observaciones aisladas.
+
+## PEQUEÑO EJEMPLO DE MODELO CON GRETA
+```{r greta_code, eval=FALSE, echo=TRUE}
+library(gridExtra)
+library(tensorflow)
+library(greta)
+y <- train[[1]]
+X <- as.matrix(train[, -1])
+n_pred <- ncol(X)
+y_greta <- as_data(y)
+X_greta <- as_data(X)
+
+# Priors Horseshoe
+tau <- cauchy(0, 0.5)                     # escala global
+lambda <- cauchy(0, 1, dim = n_pred)     # escalas locales
+beta_raw <- normal(0, 1, dim = n_pred)
+beta <- beta_raw * tau * lambda
+mu <- exp(X_greta %*% beta)
+distribution(y_greta) <- poisson(mu)
+
+# Modelo + Ajuste
+modelo <- model(beta, tau, lambda)
+plot(modelo)
+draws = mcmc(modelo, n_samples = 5000, warmup = 1000, chains = 4, verbose = TRUE)
+
+summary(draws)
+plot(draws)
+coda::gelman.diag(draws)
+coda::effectiveSize(draws)
+```
+También se ajustó un modelo Poisson bayesiano en Greta usando priors tipo horseshoe para regularizar los coeficientes. Greta permite construir modelos de forma declarativa y vectorizada, generando muestras posteriores mediante MCMC, a partir de las cuales se pueden calcular intervalos de credibilidad y visualizar densidades posteriores de los parámetros. A diferencia de rstan, no se requiere escribir código Stan, aunque algunas funciones de diagnóstico NUTS específicas no están disponibles; aun así, se pueden evaluar convergencia y tamaño efectivo de muestra con coda y bayesplot.
+
+## Comparación Lasso y modelo Bayesiano:
+```{r}
+library(glmnet)
+library(reshape2)
+library(ggplot2)
+
+# 1. Preparación de matrices
+X_train <- model.matrix(miltcoup ~ . -1, data=train)
+y_train <- train$miltcoup
+X_test  <- model.matrix(miltcoup ~ . -1, data=test)
+y_test  <- test$miltcoup
+
+# 2. Modelo Lasso (Poisson)
+cv_lasso <- cv.glmnet(X_train, y_train, family="poisson", alpha=1, nfolds=10)
+mod_lasso <- glmnet(X_train, y_train, family="poisson", alpha=1,
+                    lambda=cv_lasso$lambda.min)
+pred_lasso_test <- predict(mod_lasso, newx=X_test, type="response")
+
+# 3. Modelo Bayesiano (Poisson, Stan)
+# Escalado según entrenamiento
+X_train_bayes <- model.matrix(miltcoup ~ ., data=train)
+means <- apply(X_train_bayes[,-1], 2, mean)
+sds   <- apply(X_train_bayes[,-1], 2, sd)
+
+X_test_bayes <- model.matrix(miltcoup ~ ., data=test)
+X_test_bayes[, -1] <- sweep(X_test_bayes[, -1], 2, means, "-")
+X_test_bayes[, -1] <- sweep(X_test_bayes[, -1], 2, sds, "/")
+
+# Predicción posterior
+post_beta <- rstan::extract(fit_pois_hs, pars="beta")$beta
+mu_post_test <- exp(post_beta %*% t(X_test_bayes))
+pred_bayes_test <- apply(mu_post_test, 2, mean)
+
+# 4. Evaluación de modelos
+# MSE y MAE
+mse_lasso <- mean((y_test - pred_lasso_test)^2)
+mse_bayes <- mean((y_test - pred_bayes_test)^2)
+mae_lasso <- mean(abs(y_test - pred_lasso_test))
+mae_bayes <- mean(abs(y_test - pred_bayes_test))
+
+# Log-score
+logscore_lasso <- mean(dpois(y_test, lambda=pred_lasso_test, log=TRUE))
+logscore_bayes <- mean(dpois(y_test, lambda=pred_bayes_test, log=TRUE))
+
+# Tabla resumen
+results <- data.frame(Metodo = c("Lasso", "Bayesiano"),
+                      MSE    = c(mse_lasso, mse_bayes),
+                      MAE    = c(mae_lasso, mae_bayes),
+                      LogScore = c(logscore_lasso, logscore_bayes))
+print(results)
+
+# 6. Comparación de predicciones y errores
+df_pred <- data.frame(Observado = y_test,
+                      Lasso = as.numeric(pred_lasso_test),
+                      Bayesiano = pred_bayes_test)
+
+df_err <- reshape2::melt(df_pred, id.vars="Observado",
+                         variable.name="Modelo", value.name="Pred")
+df_err$Error <- df_err$Pred - df_err$Observado
+
+# Predicciones vs Observados
+p1 <- ggplot(df_pred, aes(x=Observado)) +
+  geom_point(aes(y=Lasso, color="Lasso")) +
+  geom_point(aes(y=Bayesiano, color="Bayesiano")) +
+  geom_abline(slope=1, intercept=0, linetype="dashed") +
+  theme_minimal() +
+  labs(title="Predicciones vs Observados", y="Predicción", color="Modelo")
+
+# Distribución de errores
+p2 <- ggplot(df_err, aes(x=Error, fill=Modelo)) +
+  geom_density(alpha=0.4) +
+  theme_minimal() +
+  labs(title="Distribución de errores", x="Error (Predicción - Observado)")
+
+# Comparación de métricas
+results_long <- reshape2::melt(results, id.vars="Metodo", 
+                               variable.name="Metrica", value.name="Valor")
+
+p3 <- ggplot(results_long, aes(x=Metrica, y=Valor, fill=Metodo)) +
+  geom_bar(stat="identity", position="dodge") + theme_minimal() +
+  labs(title="Comparación de métricas: Lasso vs Bayesiano",
+       x="Métrica", y="Valor", fill="Modelo") +
+  scale_fill_manual(values=c("Lasso"="#F4A6B5", "Bayesiano"="#9EC9E6"))
+
+print(p1)
+print(p2)
+print(p3)
+```
+Se compararon los modelos de regresión Poisson clásicos (Lasso) y bayesianos (usando prior Horseshoe en Stan) para predecir el número de golpes de Estado. Se evaluaron tanto métricas de precisión como la capacidad predictiva a través de LOO, y se analizaron las predicciones y errores de ambos modelos.
+
+Ambos modelos capturan la tendencia general de los datos, aunque el modelo bayesiano presenta una menor dispersión en las predicciones y errores más concentrados alrededor de cero, lo que indica un ajuste más estable. Además, el modelo bayesiano obtiene valores ligeramente mejores en MSE, MAE y LogScore, lo que sugiere un desempeño global más consistente.
+
+Desde el punto de vista interpretativo, el enfoque bayesiano permite cuantificar explícitamente la incertidumbre mediante distribuciones posteriores e intervalos de credibilidad, aportando información adicional frente al Lasso. Este último resulta útil para selección de variables y como herramienta exploratoria, pero no permite un análisis completo de la incertidumbre.
+
+En conjunto, el modelo bayesiano se muestra más adecuado para predicción e interpretación, mientras que el Lasso es una buena alternativa para identificar covariables relevantes de forma rápida y sencilla.
